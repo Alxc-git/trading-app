@@ -1,5 +1,23 @@
-@"
-# Secrets
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environnements virtuels
+.venv/
+venv/
+ENV/
+env/
+
+# Éditeurs/IDE
+.vscode/
+.idea/
+
+# OS / divers
+.DS_Store
+Thumbs.db
+
+# Logs & secrets courants
+*.log
 .env
-*.key
-*.pem
+.env.*
