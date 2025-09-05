@@ -1,0 +1,452 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Chart</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self' data: blob: qrc:;
+                 script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: qrc:;
+                 style-src 'self' 'unsafe-inline';
+                 img-src 'self' data: blob:;
+                 connect-src 'self' data: blob:;">
+  <style>
+    html, body { height:100%; margin:0; background:#0e1116; color:#cfd3dc; overflow:hidden; }
+    #root { position:fixed; inset:0; display:flex; flex-direction:column; gap:6px; padding:0 0 40px 0; }
+    .pane { width:100%; position:relative; }
+    #pricePane { flex: 1 1 auto; min-height: 240px; }
+    #rsiPane, #macdPane { height: 160px; flex: 0 0 auto; display:none; }
+
+    .closeBtn {
+      position:absolute; right:8px; top:8px; z-index:5;
+      width:20px; height:20px; border-radius:4px; border:1px solid #334155;
+      background:#111827; color:#e5e7eb; font: 700 12px/18px system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      text-align:center; cursor:pointer; user-select:none;
+    }
+    .closeBtn:hover { background:#0b1220; }
+
+    #loading { position:fixed; inset:0; display:none; pointer-events:none; align-items:center; justify-content:center;
+      background: rgba(0,0,0,0.35); backdrop-filter: blur(2px);
+      font: 600 16px system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color:#cfd3dc; z-index:9; }
+    #spinner { width:28px; height:28px; border-radius:50%; border:3px solid #6b7280; border-top-color:#e5e7eb; animation: spin .9s linear infinite; margin-right:10px; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+
+    #liveBtn {
+      position: fixed;
+      right: 12px; bottom: 12px;
+      z-index: 10;
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 6px 12px; border-radius: 999px; border: 1px solid #334155;
+      background: #111827; color: #e5e7eb;
+      font: 600 12px/1 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      cursor: pointer; user-select: none;
+      box-shadow: 0 2px 6px rgba(0,0,0,.35);
+    }
+    #liveBtn:hover { background: #0b1220; }
+    #liveBtn .dot { width: 8px; height: 8px; border-radius: 999px; background: #9ca3af; box-shadow: 0 0 0 2px rgba(255,255,255,.06) inset; }
+    #liveBtn.live .dot { background: #22c55e; }
+  </style>
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <script src="js/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <div id="root">
+    <div id="pricePane" class="pane"></div>
+
+    <div id="rsiPane" class="pane">
+      <div id="rsiClose" class="closeBtn" title="Fermer RSI">✕</div>
+    </div>
+
+    <div id="macdPane" class="pane">
+      <div id="macdClose" class="closeBtn" title="Fermer MACD">✕</div>
+    </div>
+  </div>
+
+  <div id="loading"><div id="spinner"></div><div>Loading…</div></div>
+  <button id="liveBtn" title="Revenir au live"><span class="dot"></span>LIVE</button>
+
+<script>
+  const root      = document.getElementById('root');
+  const priceDiv  = document.getElementById('pricePane');
+  const rsiDiv    = document.getElementById('rsiPane');
+  const macdDiv   = document.getElementById('macdPane');
+  const rsiClose  = document.getElementById('rsiClose');
+  const macdClose = document.getElementById('macdClose');
+  const overlay   = document.getElementById('loading');
+  const liveBtn   = document.getElementById('liveBtn');
+
+  const showLoading = ()=> overlay.style.display='flex';
+  const hideLoading = ()=> overlay.style.display='none';
+
+  // Cache indicateurs (pour activer l'affichage après coup)
+  const indCache = { ema20: null, rsi14: null, macd: { line:null, signal:null, hist:null } };
+
+  const GAP_BARS   = 4;
+  const MIN_PX_GAP = 56;
+  let LAST_TIME = 0, TF_SEC = 60, autoGap = true, autoY = true;
+
+  // --- Sync par logical range (bi-directionnel & fluide) ---
+  let isSyncingLogical = false;
+  function updateLiveFrom(chart){
+    if (!LAST_TIME) { liveBtn.classList.toggle('live', autoGap && autoY); return; }
+    const tr = chart.timeScale().getVisibleRange();
+    if (!tr) return;
+    const to = (typeof tr.to === 'object' && tr.to) ? tr.to.time : tr.to;
+    if (!to) return;
+    autoGap = (LAST_TIME - to) <= TF_SEC * 0.6;
+    refreshLiveBadge();
+  }
+  function syncLogicalFrom(srcChart, logical){
+    if (isSyncingLogical) return;
+    isSyncingLogical = true;
+    const r = logical ?? srcChart.timeScale().getVisibleLogicalRange();
+    if (r){
+      if (priceChart && srcChart !== priceChart) priceChart.timeScale().setVisibleLogicalRange(r);
+      if (rsiChart   && srcChart !== rsiChart)   rsiChart.timeScale().setVisibleLogicalRange(r);
+      if (macdChart  && srcChart !== macdChart)  macdChart.timeScale().setVisibleLogicalRange(r);
+      updateLiveFrom(priceChart);
+    }
+    isSyncingLogical = false;
+  }
+
+  // CHARTS (panning au drag, zoom d'origine conservé)
+  const priceChart = LightweightCharts.createChart(priceDiv, {
+    autoSize: false,
+    layout: { background: { type: 'Solid', color: '#0e1116' }, textColor: '#cfd3dc' },
+    rightPriceScale: { visible: true, borderVisible: true, drawTicks: true, scaleMargins: { top: 0.1, bottom: 0.1 } },
+    leftPriceScale:  { visible: false },
+    timeScale: { rightOffset: 0, borderVisible: false, fixRightEdge: false, shiftVisibleRangeOnNewBar: false },
+    grid: { vertLines: { visible:false }, horzLines: { visible:false } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    handleScroll: { pressedMouseMove: true, mouseWheel: true, horzTouchDrag: true, vertTouchDrag: false },
+    handleScale:  { axisPressedMouseMove: { time:true, price:true }, mouseWheel:true, pinch:true }
+  });
+  const candleSeries = priceChart.addCandlestickSeries();
+
+  let ema20Series = null;
+  let rsiChart = null, rsiSeries = null;
+  let macdChart = null, macdLineSeries = null, macdSignalSeries = null, macdHistSeries = null;
+
+  function createRsiChart(){
+    if (rsiChart) return;
+    rsiChart = LightweightCharts.createChart(rsiDiv, {
+      autoSize:false,
+      layout:{ background:{type:'solid', color:'#0b1220'}, textColor:'#e5e7eb' },
+      grid:{ vertLines:{color:'#1f2937'}, horzLines:{color:'#1f2937'} },
+      rightPriceScale:{ borderVisible:false },
+      timeScale:{ borderVisible:false },
+      handleScroll: { pressedMouseMove: true, mouseWheel: true, horzTouchDrag: true, vertTouchDrag: false },
+      handleScale:  { axisPressedMouseMove: { time:true, price:true }, mouseWheel:true, pinch:true } 
+    });
+    rsiSeries = rsiChart.addLineSeries({ lineWidth: 2, title: 'RSI 14' });
+    rsiSeries.createPriceLine({ price: 70, color: '#94a3b8', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true, title: '70' });
+    rsiSeries.createPriceLine({ price: 30, color: '#94a3b8', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true, title: '30' });
+    if (indCache.rsi14) rsiSeries.setData(indCache.rsi14);
+
+    // sync bi-dir (logical)
+    rsiChart.timeScale().subscribeVisibleLogicalRangeChange((range)=>{ if(range) syncLogicalFrom(rsiChart, range); });
+    // aligner sur la vue du prix
+    syncLogicalFrom(priceChart);
+  }
+  function destroyRsiChart(){
+    if (!rsiChart) return;
+    rsiChart.remove(); rsiChart = null; rsiSeries = null;
+  }
+
+  function createMacdChart(){
+    if (macdChart) return;
+    macdChart = LightweightCharts.createChart(macdDiv, {
+      autoSize:false,
+      layout:{ background:{type:'solid', color:'#0b1220'}, textColor:'#e5e7eb' },
+      grid:{ vertLines:{color:'#1f2937'}, horzLines:{color:'#1f2937'} },
+      rightPriceScale:{ borderVisible:false },
+      timeScale:{ borderVisible:false },
+      handleScroll: { pressedMouseMove: true, mouseWheel: true, horzTouchDrag: true, vertTouchDrag: false },
+      handleScale:  { axisPressedMouseMove: { time:true, price:true }, mouseWheel:true, pinch:true }
+    });
+    macdLineSeries   = macdChart.addLineSeries({ lineWidth: 2, title: 'MACD' });
+    macdSignalSeries = macdChart.addLineSeries({ lineWidth: 1, title: 'Signal' });
+    macdHistSeries   = macdChart.addHistogramSeries({
+      base: 0,
+      priceFormat: { type: 'price', precision: 5, minMove: 0.00001 }
+    });
+    if (indCache.macd.line)   macdLineSeries.setData(indCache.macd.line);
+    if (indCache.macd.signal) macdSignalSeries.setData(indCache.macd.signal);
+    if (indCache.macd.hist)   macdHistSeries.setData(indCache.macd.hist);
+
+    macdChart.timeScale().subscribeVisibleLogicalRangeChange((range)=>{ if(range) syncLogicalFrom(macdChart, range); });
+    syncLogicalFrom(priceChart);
+  }
+  function destroyMacdChart(){
+    if (!macdChart) return;
+    macdChart.remove(); macdChart = null;
+    macdLineSeries = macdSignalSeries = macdHistSeries = null;
+  }
+
+  function ensureSizes(){
+    const w = Math.floor(root.clientWidth), h = Math.floor(root.clientHeight);
+    if (w <= 0 || h <= 0) return;
+    let priceH = Math.max(240, Math.floor(h * 0.60));
+    let extra = 0;
+    if (rsiDiv.style.display !== 'none')  extra += 160;
+    if (macdDiv.style.display !== 'none') extra += 160;
+    priceH = Math.max(180, h - extra - 40);
+    priceChart.resize(w, priceH);
+    if (rsiChart)  rsiChart.resize(w, 160);
+    if (macdChart) macdChart.resize(w, 160);
+  }
+
+  function inferTfSec(bars){
+    if (bars.length >= 2) {
+      const d = Math.max(1, bars[bars.length-1].time - bars[bars.length-2].time);
+      TF_SEC = d;
+    }
+  }
+
+  function keepGapIfNeeded(){
+    if (!LAST_TIME) return;
+    const x = priceChart.timeScale().timeToCoordinate(LAST_TIME);
+    if (x == null) return;
+    const pxGap = root.clientWidth - x;
+    if (autoGap && pxGap < MIN_PX_GAP) {
+      priceChart.timeScale().scrollToPosition(GAP_BARS, false);
+    }
+  }
+  function ensureLastBarVisible(){
+    if (!LAST_TIME) return;
+    const x = priceChart.timeScale().timeToCoordinate(LAST_TIME);
+    if (x == null) {
+      const BARS_ON_SCREEN = 120;
+      const from = LAST_TIME - BARS_ON_SCREEN * TF_SEC;
+      const to   = LAST_TIME + GAP_BARS * TF_SEC;
+      priceChart.timeScale().setVisibleRange({ from, to });
+      if (rsiChart)  rsiChart.timeScale().setVisibleRange({ from, to });
+      if (macdChart) macdChart.timeScale().setVisibleRange({ from, to });
+    } else { keepGapIfNeeded(); }
+  }
+
+  // Dézoom/zoom horizontal par facteur via LogicalRange (factor > 1 = dézoom)
+  function zoomByFactor(chart, factor){
+    const r = chart.timeScale().getVisibleLogicalRange();
+    if (!r) { chart.timeScale().fitContent(); return; }
+    const mid  = (r.from + r.to) / 2;
+    const half = (r.to - r.from) * factor / 2;
+    const nr = { from: mid - half, to: mid + half };
+    chart.timeScale().setVisibleLogicalRange(nr);
+    // sync avec RSI/MACD
+    if (typeof syncLogicalFrom === 'function') syncLogicalFrom(chart);
+  }
+
+
+  function refreshLiveBadge(){ liveBtn.classList.toggle('live', autoGap && autoY); }
+  function goLive(){
+    autoGap = true; autoY = true;
+    priceChart.priceScale('right').applyOptions({ autoScale: true });
+    if (LAST_TIME) {
+      const from = LAST_TIME - 200 * TF_SEC, to = LAST_TIME + GAP_BARS * TF_SEC;
+      priceChart.timeScale().setVisibleRange({ from, to });
+      if (rsiChart)  rsiChart.timeScale().setVisibleRange({ from, to });
+      if (macdChart) macdChart.timeScale().setVisibleRange({ from, to });
+    } else {
+      priceChart.timeScale().fitContent();
+      if (rsiChart)  rsiChart.timeScale().fitContent();
+      if (macdChart) macdChart.timeScale().fitContent();
+    }
+    requestAnimationFrame(() => {
+      priceChart.timeScale().scrollToPosition(GAP_BARS, false);
+      keepGapIfNeeded(); refreshLiveBadge();
+    });
+  }
+  liveBtn.addEventListener('click', goLive);
+
+  // PRICE → pousse aux autres via logical range
+  priceChart.timeScale().subscribeVisibleLogicalRangeChange((range)=>{ if(range) syncLogicalFrom(priceChart, range); });
+
+  function isOnRightScale(ev, el, chart){
+    const rect = el.getBoundingClientRect();
+    const ps = chart.priceScale('right');
+    const psw = (ps && typeof ps.width === 'function') ? ps.width() : 60;
+    const x = ('clientX' in ev) ? ev.clientX : (ev.touches && ev.touches[0] ? ev.touches[0].clientX : null);
+    if (x == null) return false;
+    return x >= (rect.right - psw - 6);
+  }
+  // Interactions pane PRIX : si on manipule l'axe prix → couper l'autoscale vertical
+  ['wheel','mousedown','touchstart'].forEach(evt => {
+    priceDiv.addEventListener(evt, (e) => {
+      if (isOnRightScale(e, priceDiv, priceChart)) {
+        // on attrape l'axe vertical du prix -> pas d'autoscale
+        autoY = false;
+        priceChart.priceScale('right').applyOptions({ autoScale: false });
+      } else {
+        // on pan/scroll -> sortir du LIVE
+        autoGap = false;
+      }
+      refreshLiveBadge();
+    }, { passive:true });
+  });
+
+
+  // Interactions sur RSI/MACD → sortir du live (panning/zoom comme le prix)
+  ['wheel','mousedown','touchstart'].forEach(evt => {
+    [rsiDiv, macdDiv].forEach(el => {
+      el.addEventListener(evt, () => { autoGap = false; refreshLiveBadge(); }, { passive:true });
+    });
+  });
+
+  // Double-clic : si sur l'axe → reset autoscale vertical, sinon → dézoom horizontal
+  priceDiv.addEventListener('dblclick', (e) => {
+    if (isOnRightScale(e, priceDiv, priceChart)) {
+      // reset autoscale vertical du prix
+      autoY = true;
+      priceChart.priceScale('right').applyOptions({ autoScale: true });
+      refreshLiveBadge();
+    } else {
+      // dézoom horizontal (x1.35), tu peux ajuster 1.35 -> 1.2 / 1.5 etc.
+      zoomByFactor(priceChart, 1.35);
+    }
+  });
+
+  // Double-clic sur RSI/MACD -> reset autoscale vertical de leur pane
+  rsiDiv.addEventListener('dblclick', () => {
+    if (!rsiChart) return;
+    rsiChart.priceScale('right').applyOptions({ autoScale: true });
+  });
+  macdDiv.addEventListener('dblclick', () => {
+    if (!macdChart) return;
+    macdChart.priceScale('right').applyOptions({ autoScale: true });
+  });
+
+
+
+  function toBar(b){ return { time:b.time, open:b.open, high:b.high, low:b.low, close:b.close }; }
+  function resizeAll(){ ensureSizes(); }
+  window.addEventListener('load', resizeAll);
+  window.addEventListener('resize', resizeAll);
+  new ResizeObserver(resizeAll).observe(root);
+  const dprMedia = matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+  dprMedia.addEventListener?.('change', ()=> setTimeout(resizeAll, 50));
+
+  // QWebChannel
+  if (window.qt && typeof QWebChannel !== 'undefined') {
+    new QWebChannel(qt.webChannelTransport, (channel) => {
+      const bridge = channel.objects.bridge;
+
+      // boutons ✕
+      rsiClose.addEventListener('click', () => {
+        rsiDiv.style.display = 'none';
+        if (rsiChart) destroyRsiChart();
+        bridge.notifyIndicatorClose && bridge.notifyIndicatorClose('rsi');
+        resizeAll();
+      });
+      macdClose.addEventListener('click', () => {
+        macdDiv.style.display = 'none';
+        if (macdChart) destroyMacdChart();
+        bridge.notifyIndicatorClose && bridge.notifyIndicatorClose('macd');
+        resizeAll();
+      });
+
+      bridge.showLoading.connect(showLoading);
+      bridge.hideLoading.connect(hideLoading);
+
+      bridge.seriesLoaded.connect((jsonStr) => {
+        const bars = JSON.parse(jsonStr).map(toBar);
+        candleSeries.setData(bars);
+        resizeAll();
+        if (bars.length) {
+          LAST_TIME = bars[bars.length - 1].time;
+          TF_SEC = bars.length >= 2 ? Math.max(1, bars[bars.length-1].time - bars[bars.length-2].time) : TF_SEC;
+        }
+
+        autoGap = true; autoY = true;
+        priceChart.priceScale('right').applyOptions({ autoScale: true });
+        refreshLiveBadge();
+
+        priceChart.timeScale().fitContent();
+        if (rsiChart)  rsiChart.timeScale().fitContent();
+        if (macdChart) macdChart.timeScale().fitContent();
+        requestAnimationFrame(() => {
+          priceChart.timeScale().scrollToPosition(GAP_BARS, false);
+          ensureLastBarVisible(); refreshLiveBadge();
+        });
+
+        hideLoading();
+      });
+
+      bridge.barUpdated.connect((jsonStr) => {
+        const b = JSON.parse(jsonStr);
+        candleSeries.update(toBar(b));
+        if (b.time >= LAST_TIME) LAST_TIME = b.time;
+        if (autoY) priceChart.priceScale('right').applyOptions({ autoScale: true });
+        ensureLastBarVisible(); refreshLiveBadge();
+      });
+
+      // Séries d'indicateurs (historiques)
+      bridge.indicatorsLoaded.connect((json) => {
+        const d = JSON.parse(json || '{}');
+        indCache.ema20 = d.ema20 || null;
+        indCache.rsi14 = d.rsi14 || null;
+        indCache.macd.line   = d.macd && d.macd.line   || null;
+        indCache.macd.signal = d.macd && d.macd.signal || null;
+        indCache.macd.hist   = d.macd && d.macd.hist   || null;
+
+        if (ema20Series && indCache.ema20) ema20Series.setData(indCache.ema20);
+        if (rsiSeries  && indCache.rsi14)  rsiSeries.setData(indCache.rsi14);
+        if (macdLineSeries && indCache.macd.line)   macdLineSeries.setData(indCache.macd.line);
+        if (macdSignalSeries && indCache.macd.signal) macdSignalSeries.setData(indCache.macd.signal);
+        if (macdHistSeries && indCache.macd.hist)   macdHistSeries.setData(indCache.macd.hist);
+        resizeAll();
+      });
+
+      // Tick d'indicateurs
+      bridge.indicatorUpdated.connect((json) => {
+        const p = JSON.parse(json || '{}');
+        if (p.ema20) { if (ema20Series && p.ema20.value != null) ema20Series.update(p.ema20); }
+        if (p.rsi14) { if (rsiSeries && p.rsi14.value != null) rsiSeries.update(p.rsi14); }
+        if (p.macd) {
+          if (macdLineSeries   && p.macd.macd   != null) macdLineSeries.update({ time:p.macd.time, value:p.macd.macd });
+          if (macdSignalSeries && p.macd.signal != null) macdSignalSeries.update({ time:p.macd.time, value:p.macd.signal });
+          if (macdHistSeries   && p.macd.hist   != null) macdHistSeries.update({ time:p.macd.time, value:p.macd.hist });
+        }
+      });
+
+      // Toggle visibilité (Python -> JS)
+      bridge.indicatorToggle.connect((json) => {
+        const f = JSON.parse(json || '{}'); // {ema20:bool, rsi:bool, macd:bool}
+
+        // EMA overlay
+        if (f.ema20) {
+          if (!ema20Series) ema20Series = priceChart.addLineSeries({ lineWidth:2, title:'EMA 20' });
+          if (indCache.ema20) ema20Series.setData(indCache.ema20);
+        } else if (ema20Series) {
+          priceChart.removeSeries(ema20Series); ema20Series = null;
+        }
+
+        // RSI pane
+        if (f.rsi) {
+          rsiDiv.style.display = 'block';
+          if (!rsiChart) createRsiChart();
+          if (indCache.rsi14 && rsiSeries) rsiSeries.setData(indCache.rsi14);
+          syncLogicalFrom(priceChart); // aligner la vue
+        } else {
+          rsiDiv.style.display = 'none';
+          if (rsiChart) destroyRsiChart();
+        }
+
+        // MACD pane
+        if (f.macd) {
+          macdDiv.style.display = 'block';
+          if (!macdChart) createMacdChart();
+          syncLogicalFrom(priceChart); // aligner la vue
+        } else {
+          macdDiv.style.display = 'none';
+          if (macdChart) destroyMacdChart();
+        }
+
+        requestAnimationFrame(() => { ensureSizes(); ensureLastBarVisible(); });
+      });
+    });
+  }
+</script>
+
+</body>
+</html>

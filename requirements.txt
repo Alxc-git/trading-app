@@ -1,0 +1,21 @@
+PyQt6==6.7.1
+PyQt6-Qt6==6.7.2
+PyQt6-WebEngine==6.7.0
+PyQt6-WebEngine-Qt6==6.7.2
+
+# MT5: garde 4424 pour Python < 3.13, bascule sur 5200 pour 3.13+
+MetaTrader5==5.0.4424; python_version < "3.13"
+MetaTrader5==5.0.5200; python_version >= "3.13"
+
+# Données (compatibles 3.13)
+numpy>=2.0,<2.3
+pandas>=2.2.3,<2.3
+
+pydantic==2.7.4
+python-dotenv>=1.0
+groq>=0.11.0
+requests>=2.31
+
+feedparser>=6.0.11,<7
+python-dateutil>=2.9.0.post0,<3
+

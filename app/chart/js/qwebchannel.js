@@ -1,0 +1,1 @@
+// (copie depuis installation Qt)
