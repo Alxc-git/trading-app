@@ -1,3 +1,7 @@
+## 📸 Aperçu de l’application
+
+![Screenshot de Trading App](assets/screenshot.png)
+
 # 🚀 Trading App
 
 Application de trading temps réel en **Python (PyQt6)**, reliée à **MetaTrader 5** et à l’**IA Groq**.  
