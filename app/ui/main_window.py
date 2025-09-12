@@ -8,6 +8,8 @@ from PyQt6.QtWidgets import (
     QComboBox, QSizePolicy, QToolButton, QMenu, QLabel, QHBoxLayout
 )
 
+from PyQt6.QtWidgets import QStatusBar
+
 from app.chart.chart_view import ChartView
 from app.data.mt5_source import DataWorker
 from app.chat.chat_panel import ChatPanel
@@ -16,16 +18,58 @@ from app.news.news_service import NewsService
 from app.indicators.ta import IndicatorEngine
 
 DARK_QSS = """
-QMainWindow, QWidget { background-color: #0e1116; color: #cfd3dc; }
-QToolBar { background: #0b1220; border-bottom: 1px solid #1f2937; spacing: 8px; padding: 6px; }
-QComboBox { background: #111827; color: #e5e7eb; border: 1px solid #334155; padding: 5px 10px; border-radius: 6px; }
-QComboBox::drop-down { border: none; }
-QComboBox QAbstractItemView { background: #0b1220; color: #e5e7eb; }
-QTextEdit, QTextBrowser { background: #0b1220; border: 1px solid #1f2937; border-radius: 8px; padding: 6px; color: #e5e7eb; }
-QLineEdit { background: #0b1220; border: 1px solid #334155; padding: 6px 8px; border-radius: 6px; color: #e5e7eb; }
-QSplitter::handle { background: #0e1116; width: 4px; }
-QSplitter::handle:hover { background: #1f2937; }
-QToolButton { background:#111827; color:#e5e7eb; border:1px solid #334155; padding:5px 10px; border-radius:6px; }
+    /* --------- Global --------- */
+    QMainWindow, QWidget { background-color:#0e1116; color:#cfd3dc; }
+    * { font-family: "Inter", "Segoe UI", system-ui; font-size:13px; }
+
+    /* --------- Toolbar chips --------- */
+    QToolBar { background:#0b1220; border-bottom:1px solid #1f2937; spacing:10px; padding:6px; }
+    QComboBox {
+    background:#0f172a; color:#e5e7eb; border:1px solid #334155;
+    padding:6px 10px; border-radius:999px; /* pill */
+    }
+    QComboBox::drop-down { border:none; width:0; }
+    QComboBox QAbstractItemView { background:#0b1220; color:#e5e7eb; border:1px solid #1f2937; }
+
+    /* Boutons (panneau, menu indicateurs, etc.) */
+    QToolButton, QPushButton {
+    background:#111827; color:#e5e7eb; border:1px solid #334155;
+    padding:6px 12px; border-radius:10px;
+    }
+    QToolButton:hover, QPushButton:hover { background:#0b1220; }
+    QToolButton:checked { background:#0b1220; border-color:#475569; }
+
+    /* --------- Splitter --------- */
+    QSplitter::handle { background:#0e1116; width:5px; }
+    QSplitter::handle:hover { background:#1f2937; }
+
+    /* --------- Text areas (chat/news) --------- */
+    QTextBrowser {
+    background:#0f131a; color:#e5e7eb; border:1px solid #1f2937; border-radius:10px;
+    }
+    QPlainTextEdit {
+    background:transparent; color:#e5e7eb; border:none;
+    }
+
+    /* --------- Scrollbars --------- */
+    QScrollBar:vertical {
+    background:transparent; width:10px; margin:2px; border:none;
+    }
+    QScrollBar::handle:vertical {
+    background:#293241; min-height:24px; border-radius:6px;
+    }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
+    QScrollBar:horizontal { height:10px; }
+    QScrollBar::handle:horizontal { background:#293241; border-radius:6px; }
+
+    /* --------- Chips “état” --------- */
+    .Badge {
+    background:#111827; border:1px solid #334155; color:#cfd3dc;
+    padding:2px 8px; border-radius:999px;
+    }
+    .Badge--ok { background:#0a1f16; border-color:#1f7a4f; color:#8ff0b8; }
+    .Badge--warn { background:#1f1a0a; border-color:#7a611f; color:#ffd479; }
+    .Badge--err { background:#1f0a0a; border-color:#7a1f1f; color:#ff9a9a; }
 """
 
 def _flags(ema: bool, rsi: bool, macd: bool, show_tr: bool, show_vbo: bool) -> dict:

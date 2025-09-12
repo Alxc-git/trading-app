@@ -164,13 +164,13 @@ class ChatPanel(QWidget):
 
     # ---------- API utilisée par le contrôleur ----------
     def append_user(self, text: str):
-        self.view.append(f"<div style='color:#93c5fd'><b>Toi</b> : {self._esc(text)}</div>")
+        self.view.append(f"<div style='color:#93c5fd'><b>👤 Toi</b> : {self._esc(text)}</div>")
 
     def append_assistant(self, text: str):
         # on supprime le “Envoi à l’IA…” s’il est visible
         if self.status.text():
             self.status.setText("")
-        self.view.append(f"<div style='color:#e5e7eb'><b>IA</b> : {self._esc(text)}</div>")
+        self.view.append(f"<div style='color:#e5e7eb'><b>🤖 IA</b> : {self._esc(text)}</div>")
 
     def append_note(self, text: str):
         self.status.setText(text)
