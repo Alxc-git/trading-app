@@ -1,5 +1,9 @@
 # app/data/mt5_source.py
+from __future__ import annotations
+
 from datetime import datetime, timedelta, timezone
+from typing import Optional
+
 import MetaTrader5 as MT5
 import pandas as pd
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer
@@ -7,7 +11,15 @@ from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer
 from .models import Bar
 from .resample import CandleAggregator
 
-TIMEFRAMES = {"M1": MT5.TIMEFRAME_M1, "M5": MT5.TIMEFRAME_M5, "M30": MT5.TIMEFRAME_M30}
+# ---------------------------
+#  Constantes & Config MT5
+# ---------------------------
+
+TIMEFRAMES = {
+    "M1": MT5.TIMEFRAME_M1,
+    "M5": MT5.TIMEFRAME_M5,
+    "M30": MT5.TIMEFRAME_M30,
+}
 TF_SECONDS = {"M1": 60, "M5": 300, "M30": 1800}
 
 MT5_PATH = r"C:\Program Files\MetaTrader 5\terminal64.exe"
@@ -15,15 +27,36 @@ MT5_PATH = r"C:\Program Files\MetaTrader 5\terminal64.exe"
 # Debug console
 DEBUG = True
 def _dbg(*a):
-    if DEBUG: print(*a)
+    if DEBUG:
+        print(*a)
 
-# Optionnel (désactivé par défaut) : n’émettre l’historique au chart que si on a
-# un minimum de barres afin d’éviter le cas “1 seule bougie” au tout premier lancement.
+# ---------------------------------------
+#  Option "hist min bars" (désactivée)
+# ---------------------------------------
+# Tu ne veux PAS forcer un minimum en continu → laisse False.
 ENFORCE_MIN_BARS = False
 MIN_BARS = 50
 
+# ---------------------------------------
+#  First-load only (anti "une seule bougie")
+# ---------------------------------------
+# On bufferise uniquement au tout premier affichage.
+FIRST_LOAD_MIN_BARS = 120      # seuil confortable pour l'échelle initiale
+FIRST_LOAD_TIMEOUT_MS = 2500   # délai max d'attente avant d'envoyer quand même
+
 
 class DataWorker(QObject):
+    """
+    Worker MT5:
+      - historyReady(list[dict]): premier batch (setData côté chart)
+      - barReady(dict): mise à jour live (update côté chart)
+
+    Ajouts:
+      - Buffer "first-load only": on accumule jusqu'à FIRST_LOAD_MIN_BARS
+        ou jusqu'au FIRST_LOAD_TIMEOUT_MS puis on envoie une seule fois.
+      - Ensuite, flux normal sans latence (emit direct).
+    """
+
     historyReady = pyqtSignal(list)   # list[dict]
     barReady     = pyqtSignal(dict)   # dict
     finished     = pyqtSignal()       # signal d’arrêt propre
@@ -47,7 +80,13 @@ class DataWorker(QObject):
         self._seed_bar: dict | None = None
         self._debug_tick_count = 0
 
+        # -------- First-load only --------
+        self._first_load_done: bool = False
+        self._first_buffer: list[dict] = []
+        self._first_timer: QTimer | None = None
+
     # ---------- lifecycle ----------
+
     @pyqtSlot()
     def start(self):
         """Démarre depuis le thread du worker (connecté à QThread.started)."""
@@ -66,6 +105,14 @@ class DataWorker(QObject):
         print(f"✅ MT5 initialized (worker) [{self.symbol} {self.tf}]")
 
         self._history_retry = 0
+
+        # Démarre le timer "first-load only" (sécurité anti-blocage)
+        if not self._first_load_done and FIRST_LOAD_TIMEOUT_MS > 0:
+            self._first_timer = QTimer(self)
+            self._first_timer.setSingleShot(True)
+            self._first_timer.timeout.connect(self._flush_first_load_due_to_timeout)
+            self._first_timer.start(FIRST_LOAD_TIMEOUT_MS)
+
         self._load_history()
         self.start_stream()
 
@@ -78,6 +125,7 @@ class DataWorker(QObject):
         self.finished.emit()
 
     # ---------- commandes UI ----------
+
     @pyqtSlot(str, str)
     def set_params(self, symbol: str, timeframe: str):
         """Changement fluide de symbole/timeframe sans tuer le thread."""
@@ -93,6 +141,8 @@ class DataWorker(QObject):
         self._last_tick_time = 0
         self._history_retry  = 0
 
+        # IMPORTANT: on ne réactive pas le "first-load only" ici.
+        # Il ne sert qu'au tout premier rendu de la session.
         self._load_history()
         self.start_stream()
         print(f"🔁 Params applied → {self.symbol} {self.tf}")
@@ -124,11 +174,12 @@ class DataWorker(QObject):
             self._tick_timer = None
 
     # ---------- interne ----------
+
     def _ensure_symbol_selected(self, symbol: str):
         if not MT5.symbol_select(symbol, True):
             print(f"⚠️ symbol_select({symbol}) a échoué:", MT5.last_error())
 
-    def _latest_tick(self):
+    def _latest_tick(self) -> Optional[dict]:
         t = MT5.symbol_info_tick(self.symbol)
         if not t:
             return None
@@ -187,24 +238,33 @@ class DataWorker(QObject):
 
         # Construction des barres
         df = pd.DataFrame(rates)
-        vol_col = "real_volume" if "real_volume" in df.columns else ("tick_volume" if "tick_volume" in df.columns else None)
+        vol_col = (
+            "real_volume"
+            if "real_volume" in df.columns
+            else ("tick_volume" if "tick_volume" in df.columns else None)
+        )
 
         bars: list[dict] = []
         for r in df.itertuples(index=False):
-            bars.append(Bar(
-                time=int(getattr(r, "time")),
-                open=float(getattr(r, "open")),
-                high=float(getattr(r, "high")),
-                low=float(getattr(r, "low")),
-                close=float(getattr(r, "close")),
-                volume=float(getattr(r, vol_col)) if vol_col and hasattr(r, vol_col) else 0.0
-            ).model_dump())
+            bars.append(
+                Bar(
+                    time=int(getattr(r, "time")),
+                    open=float(getattr(r, "open")),
+                    high=float(getattr(r, "high")),
+                    low=float(getattr(r, "low")),
+                    close=float(getattr(r, "close")),
+                    volume=float(getattr(r, vol_col)) if vol_col and hasattr(r, vol_col) else 0.0,
+                ).model_dump()
+            )
 
-        # Optionnel : attendre un minimum de barres au tout premier lancement
+        # Optionnel (désactivé) : attendre un minimum de barres en continu
         if ENFORCE_MIN_BARS and len(bars) < MIN_BARS:
             if self._history_retry < self._max_history_retries:
                 self._history_retry += 1
-                print(f"⏳ Historique trop court ({len(bars)}<{MIN_BARS}) pour {self.symbol} {self.tf} — retry {self._history_retry}/{self._max_history_retries}")
+                print(
+                    f"⏳ Historique trop court ({len(bars)}<{MIN_BARS}) pour {self.symbol} {self.tf} — "
+                    f"retry {self._history_retry}/{self._max_history_retries}"
+                )
                 QTimer.singleShot(1000, self._load_history)
                 return
             else:
@@ -217,14 +277,26 @@ class DataWorker(QObject):
         if tick:
             if current_slot > last_time:
                 p = tick["price"]
-                bars.append(Bar(time=current_slot, open=p, high=p, low=p, close=p, volume=0.0).model_dump())
+                bars.append(
+                    Bar(
+                        time=current_slot, open=p, high=p, low=p, close=p, volume=0.0
+                    ).model_dump()
+                )
                 _dbg(f"[HIST] last={last_time}, tick_slot={current_slot} → add stub")
             else:
                 _dbg(f"[HIST] last={last_time}, tick_slot={current_slot}")
 
         self._seed_bar = bars[-1]
-        print(f"📦 {self.symbol} {self.tf} history bars: {len(bars)}  (last={self._seed_bar['time']})")
-        self.historyReady.emit(bars)
+        _dbg(f"📦 {self.symbol} {self.tf} history bars: {len(bars)}  (last={self._seed_bar['time']})")
+
+        # ===== FIRST-LOAD ONLY =====
+        if not self._first_load_done:
+            # On empile le batch historique dans le buffer
+            self._first_buffer.extend(bars)
+            self._maybe_flush_first_load()
+        else:
+            # Après le premier rendu, on continue en comportement normal
+            self.historyReady.emit(bars)
 
     def _poll_tick(self):
         """Boucle timer (100ms) — agrège les ticks en bougie courante + ferme la précédente."""
@@ -258,10 +330,18 @@ class DataWorker(QObject):
 
         # si on a sauté >1 slot (veille/réveil, pertes de ticks, etc.)
         if self._agg.slot is not None and slot > self._agg.slot + tf_sec:
-            closed = Bar(time=self._agg.slot, open=self._agg.o, high=self._agg.h, low=self._agg.l, close=self._agg.c, volume=self._agg.v)
-            self.barReady.emit(closed.model_dump())
-            self._agg.seed(Bar(time=slot, open=price, high=price, low=price, close=price, volume=vol))
-            self.barReady.emit(Bar(time=slot, open=price, high=price, low=price, close=price, volume=vol).model_dump())
+            closed = Bar(
+                time=self._agg.slot,
+                open=self._agg.o,
+                high=self._agg.h,
+                low=self._agg.l,
+                close=self._agg.c,
+                volume=self._agg.v,
+            )
+            self._emit_or_buffer(closed)
+            seed = Bar(time=slot, open=price, high=price, low=price, close=price, volume=vol)
+            self._agg.seed(seed)
+            self._emit_or_buffer(seed)
             if DEBUG and self._debug_tick_count < 6:
                 _dbg(f"[TICK] jump → seed @ {slot}")
                 self._debug_tick_count += 1
@@ -269,9 +349,45 @@ class DataWorker(QObject):
 
         closed, cur = self._agg.push_tick(int(tick.time), float(price), vol)
         if closed:
-            self.barReady.emit(closed.model_dump())
-        self.barReady.emit(cur.model_dump())
+            self._emit_or_buffer(closed)
+        self._emit_or_buffer(cur)
 
         if DEBUG and self._debug_tick_count < 6:
             _dbg(f"[TICK] tick_slot={slot} agg.slot={self._agg.slot} price={price}")
             self._debug_tick_count += 1
+
+    # ---------- helpers "first-load only" ----------
+
+    def _emit_or_buffer(self, bar: Bar):
+        """Pendant le first-load, on bufferise. Ensuite, on émet en direct."""
+        if not self._first_load_done:
+            self._first_buffer.append(bar.model_dump())
+            self._maybe_flush_first_load()
+        else:
+            self.barReady.emit(bar.model_dump())
+
+    def _maybe_flush_first_load(self):
+        if self._first_load_done:
+            return
+        if len(self._first_buffer) >= FIRST_LOAD_MIN_BARS:
+            self._flush_first_load()
+
+    def _flush_first_load_due_to_timeout(self):
+        if self._first_load_done:
+            return
+        if len(self._first_buffer) > 0:
+            self._flush_first_load()
+        else:
+            # pas de data : on passe quand même en mode live pour ne pas bloquer
+            self._first_load_done = True
+
+    def _flush_first_load(self):
+        batch = self._first_buffer
+        self._first_buffer = []
+        try:
+            self.historyReady.emit(batch)
+        finally:
+            self._first_load_done = True
+            if self._first_timer:
+                self._first_timer.stop()
+                self._first_timer = None

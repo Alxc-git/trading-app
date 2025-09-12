@@ -117,6 +117,15 @@ class MainWindow(QMainWindow):
         # Worker / data
         self.thread = QThread(self)
         self.worker = DataWorker(self.sym.currentText(), self.tf.currentText(), depth=5000)
+        # après avoir créé:
+        # self.chart = ChartView()
+        # self.worker = DataWorker(...)
+
+        # batch initial -> JS (seriesLoaded)
+        self.worker.historyReady.connect(self.chart.bridge.send_bars_batch)
+        # updates live -> JS (barUpdated)
+        self.worker.barReady.connect(self.chart.bridge.send_bar_update)
+
         self.worker.moveToThread(self.thread)
         self.thread.finished.connect(self.worker.deleteLater)
         self.thread.started.connect(self.worker.start)
@@ -151,7 +160,7 @@ class MainWindow(QMainWindow):
         self.actOFF.triggered.connect(self._on_off)
 
         if hasattr(self.chart, "bridge") and self.chart.bridge:
-            self.chart.bridge.indicatorCloseRequested.connect(self._on_indicator_closed_from_js)
+            self.chart.bridge.indicatorClosed.connect(self._on_indicator_closed_from_js)
 
         self._news_recent: list[dict] = []
 

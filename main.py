@@ -4,6 +4,7 @@ import os, sys
 from PyQt6.QtCore import QCoreApplication, Qt
 QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
 
+from app.ui.main_window import MainWindow
 os.environ.setdefault("QTWEBENGINE_REMOTE_DEBUGGING", "9222")
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--remote-allow-origins=*")
 

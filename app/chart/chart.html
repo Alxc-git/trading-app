@@ -55,6 +55,9 @@
   <button id="liveBtn" title="Revenir au live"><span class="dot"></span>LIVE</button>
 
 <script>
+
+  let HAS_INITIAL = false;
+
   const MAX_MARKERS = 600;
 
   const root = document.getElementById('root');
@@ -261,7 +264,9 @@
       bridge.seriesLoaded.connect((jsonStr) => {
         const bars = JSON.parse(jsonStr).map(toBar);
         candleSeries.setData(bars);
-        if(bars.length){
+        HAS_INITIAL = true;
+
+        if (bars.length) {
           LAST_TIME = bars[bars.length-1].time;
           TF_SEC = bars.length>=2 ? Math.max(1, bars[bars.length-1].time - bars[bars.length-2].time) : TF_SEC;
         }
@@ -270,10 +275,19 @@
         hideLoading();
       });
 
-      bridge.barUpdated.connect((jsonStr)=>{
-        const b=JSON.parse(jsonStr); candleSeries.update(toBar(b));
-        if(b.time>=LAST_TIME) LAST_TIME=b.time; ensureLastBarVisible();
+      bridge.barUpdated.connect((jsonStr) => {
+        const bar = toBar(JSON.parse(jsonStr));
+        if (!HAS_INITIAL) {
+          candleSeries.setData([bar]);
+          HAS_INITIAL = true;
+          LAST_TIME = bar.time;
+        } else {
+          candleSeries.update(bar);
+          if (bar.time >= LAST_TIME) LAST_TIME = bar.time;
+        }
+        ensureLastBarVisible();
       });
+
 
       bridge.indicatorsLoaded.connect((json)=>{
         const d=JSON.parse(json||'{}');
